@@ -1,0 +1,8 @@
+{
+  "name": "GemMan",
+  "description": "An elegant front-end pipeline tool that reads Google Drive assets to generate, preview, and output custom websites ready to deploy instantly via GitHub and Cloudflare Pages.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
