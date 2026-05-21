@@ -1,61 +1,51 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User, signOut } from "firebase/auth";
 import { 
-  Database, FolderOpen, CheckCircle2, RefreshCw, 
-  Shield, LogOut, Info, Bot, Network, Download
+  Shield, LogOut, Info, Bot, Cloud, Terminal, Fingerprint,
+  Mic, Video, Phone, Activity, Paperclip, Waves, Database
 } from "lucide-react";
-import JSZip from "jszip";
 import firebaseConfig from "../firebase-applet-config.json";
-import { DriveFile, CrawledFileData } from "./types";
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const provider = new GoogleAuthProvider();
-
-// Scopes required for Drive crawler
 provider.addScope("https://www.googleapis.com/auth/drive.readonly");
-provider.addScope("https://www.googleapis.com/auth/spreadsheets.readonly");
-provider.addScope("https://www.googleapis.com/auth/documents.readonly");
 
-const PRESET_DATA: Record<string, { role: string, tone: string, title: string }> = {
-  custom: { role: "", tone: "professional", title: "Custom Gem" },
-  financial: { 
-    title: "Financial Data Agent",
-    role: "You are an expert Financial Analysis Agent. Intercept and evaluate financial data payloads. Calculate core metrics (MRR, churn, LTV), recognize anomalies, and provide strategic insights. Follow standard GAAP reporting structures and avoid making unbacked financial guarantees.", 
-    tone: "professional" 
+const PRESET_DATA: Record<string, { role: string, access: string, title: string }> = {
+  internal: { 
+    title: "Financial Paraplanner (Enterprise)",
+    role: "You are an internal financial agent. Extract structured metrics (MRR, EBITDA) from edge multimedia streams. Output raw JSON for GCP Data Lake ingestion.", 
+    access: "zero-trust" 
   },
-  support: { 
-    title: "Customer Support Agent",
-    role: "You are an empathetic, highly effective Customer Service Agent. Your objective is to resolve user issues rapidly using the provided knowledge base. Diffuse frustration, outline clear steps for resolution, and always cite specific sections from the documentation to build trust.", 
-    tone: "conversational" 
+  customer: { 
+    title: "Omni-Channel Support (Public)",
+    role: "You are an empathetic front-line support agent. Respond conversationally via synthesized voice. Rely on KV mapped knowledge base. Escalate anomalies to Workspace.", 
+    access: "public" 
   }
 };
 
+type LogEntry = { time: string; text: string; type: "sys" | "ai" | "user" };
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(null);
   const [loadingAuth, setLoadingAuth] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  // Gem Configuration
-  const [presetId, setPresetId] = useState("support");
-  const [gemName, setGemName] = useState(PRESET_DATA.support.title);
-  const [gemRole, setGemRole] = useState(PRESET_DATA.support.role);
-  const [gemTone, setGemTone] = useState(PRESET_DATA.support.tone);
+  // Prompt Engine Config
+  const [presetId, setPresetId] = useState("customer");
+  const [gemRole, setGemRole] = useState(PRESET_DATA.customer.role);
+  const [accessLevel, setAccessLevel] = useState(PRESET_DATA.customer.access);
 
-  // Workspace configuration (Drive)
-  const [driveUrlOrId, setDriveUrlOrId] = useState("");
-  const [isCrawling, setIsCrawling] = useState(false);
-  const [crawledFiles, setCrawledFiles] = useState<CrawledFileData[]>([]);
-  const [crawlLog, setCrawlLog] = useState<string[]>([]);
-  
-  // Export configuration
-  const [isDeploying, setIsDeploying] = useState(false);
-  const [deployLogs, setDeployLogs] = useState<string[]>([]);
+  // Meeting / Multimodal State
+  const [isMeetingActive, setIsMeetingActive] = useState(false);
+  const [meetingTranscript, setMeetingTranscript] = useState<LogEntry[]>([]);
+  const [telemetryLogs, setTelemetryLogs] = useState<LogEntry[]>([]);
+  const activeTimeouts = useRef<NodeJS.Timeout[]>([]);
+  const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const telemetryEndRef = useRef<HTMLDivElement>(null);
 
-  // Monitor Auth with Firebase
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
@@ -64,275 +54,119 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  const handlePresetSelect = (id: string) => {
-    setPresetId(id);
-    const data = PRESET_DATA[id];
-    setGemName(data.title);
-    setGemRole(data.role);
-    setGemTone(data.tone);
-  };
+  useEffect(() => {
+    if (transcriptEndRef.current) transcriptEndRef.current.scrollIntoView({ behavior: "smooth" });
+  }, [meetingTranscript]);
 
-  // Handle Sign-In popup with Google
+  useEffect(() => {
+    if (telemetryEndRef.current) telemetryEndRef.current.scrollIntoView({ behavior: "smooth" });
+  }, [telemetryLogs]);
+
   const handleGoogleSignIn = async () => {
     setAuthError(null);
     try {
-      const result = await signInWithPopup(auth, provider);
-      const credential = GoogleAuthProvider.credentialFromResult(result);
-      if (credential?.accessToken) {
-        setToken(credential.accessToken);
-      } else {
-        setAuthError("Could not retrieve access token. Let's try again.");
-      }
+      await signInWithPopup(auth, provider);
     } catch (error: any) {
-      console.error("Auth Failure", error);
-      setAuthError(error.message || "Sign-In was blocked or cancelled. Try opening this app in a new tab.");
+      setAuthError(error.message);
     }
   };
 
   const handleDisconnect = async () => {
-    try {
-      await signOut(auth);
-      setUser(null);
-      setToken(null);
-      setCrawledFiles([]);
-      setDriveUrlOrId("");
-    } catch (e) {
-      console.error(e);
-    }
+    await signOut(auth);
+    setUser(null);
   };
 
-  // Google Drive Crawling Logic
-  const parseFolderId = (input: string) => {
-    const trimmed = input.trim();
-    if (!trimmed) return "";
-    const urlPattern = /folders\/([a-zA-Z0-9-_]+)/;
-    const match = trimmed.match(urlPattern);
-    return match && match[1] ? match[1] : trimmed;
+  const handlePresetSelect = (id: string) => {
+    setPresetId(id);
+    const data = PRESET_DATA[id];
+    setGemRole(data.role);
+    setAccessLevel(data.access);
   };
 
-  const fetchFilesInFolder = async (folderId: string): Promise<DriveFile[]> => {
-    let allFiles: DriveFile[] = [];
-    let pageToken = "";
-    do {
-      const query = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-      let listUrl = `https://www.googleapis.com/drive/v3/files?q=${query}&fields=nextPageToken,files(id,name,mimeType)&pageSize=100`;
-      if (pageToken) listUrl += `&pageToken=${pageToken}`;
-      
-      const response = await fetch(listUrl, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status} failed to browse Drive.`);
-      
-      const data = await response.json();
-      allFiles = allFiles.concat(data.files || []);
-      pageToken = data.nextPageToken;
-    } while (pageToken);
+  const addTelemetry = (text: string, type: "sys" | "ai" = "sys") => {
+    setTelemetryLogs(prev => [...prev, { time: new Date().toISOString().split('T')[1].slice(0,8), text, type }]);
+  };
+
+  const addTranscript = (text: string, type: "user" | "ai") => {
+    setMeetingTranscript(prev => [...prev, { time: new Date().toISOString().split('T')[1].slice(0,8), text, type }]);
+  };
+
+  const simulateAiMeeting = () => {
+    setIsMeetingActive(true);
+    setMeetingTranscript([]);
+    setTelemetryLogs([]);
+    activeTimeouts.current.forEach(clearTimeout);
+    activeTimeouts.current = [];
+
+    const schedule = (delay: number, action: () => void) => {
+      const t = setTimeout(action, delay);
+      activeTimeouts.current.push(t);
+    };
+
+    schedule(200, () => addTelemetry("→ [CF WebRTC] Edge tunnel established (Latency: 12ms)", "sys"));
+    schedule(800, () => addTelemetry("→ [Workers AI] Omni-modal MCP loaded. Awaiting multimodal stream.", "sys"));
     
-    return allFiles;
-  };
-
-  const traverseAndDigest = async (folderId: string, currentPath: string = ""): Promise<CrawledFileData[]> => {
-    let results: CrawledFileData[] = [];
-    const files = await fetchFilesInFolder(folderId);
+    // Simulating conversation
+    schedule(1500, () => addTranscript("Hi, this is Jordan. I need an enterprise quote to migrate our pipeline next quarter.", "user"));
+    schedule(1800, () => addTelemetry("→ [Workers AI] Streaming inference intent: 'enterprise_quote'. Horizon: 'next_quarter'.", "ai"));
     
-    for (const file of files) {
-      if (file.mimeType === "application/vnd.google-apps.folder") {
-        setCrawlLog(prev => [...prev, `📂 Entering subfolder: ${currentPath}${file.name}/`]);
-        const subFiles = await traverseAndDigest(file.id, `${currentPath}${file.name}/`);
-        results = results.concat(subFiles);
-      } else {
-        setCrawlLog(prev => [...prev, `📄 Digesting: ${currentPath}${file.name}`]);
-        let extractedContent = "";
-
-        if (file.mimeType === "application/vnd.google-apps.document") {
-          const docRes = await fetch(`https://docs.googleapis.com/v1/documents/${file.id}`, {
-            headers: { Authorization: `Bearer ${token}` }
-          });
-          if (docRes.ok) {
-            const docData = await docRes.json();
-            const bodyContent = docData.body?.content || [];
-            const textLines: string[] = [];
-            bodyContent.forEach((elem: any) => {
-              if (elem.paragraph) {
-                elem.paragraph.elements?.forEach((el: any) => {
-                  if (el.textRun?.content) textLines.push(el.textRun.content);
-                });
-              }
-            });
-            extractedContent = textLines.join("").trim();
-          }
-        } 
-        else if (file.mimeType === "application/vnd.google-apps.spreadsheet") {
-          const sheetRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${file.id}/values/A1:Z60`, {
-            headers: { Authorization: `Bearer ${token}` }
-          });
-          if (sheetRes.ok) {
-            const sheetData = await sheetRes.json();
-            const rows = sheetData.values || [];
-            extractedContent = rows.map((r: string[]) => r.join(",")).join("\n");
-          }
-        }
-        else if (["text/csv", "text/plain", "application/json"].includes(file.mimeType)) {
-          const mediaRes = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, {
-            headers: { Authorization: `Bearer ${token}` }
-          });
-          if (mediaRes.ok) extractedContent = await mediaRes.text();
-        }
-
-        if (extractedContent) {
-          results.push({ id: file.id, name: currentPath + file.name, mimeType: file.mimeType, content: extractedContent });
-          setCrawlLog(prev => [...prev, `✅ Indexed: ${currentPath}${file.name}`]);
-        }
-      }
-    }
-    return results;
-  };
-
-  const handleCrawlDrive = async () => {
-    const folderId = parseFolderId(driveUrlOrId);
-    if (!folderId || !token) {
-      alert("Please provide a valid Google Drive Folder ID and ensure you are signed in.");
-      return;
-    }
-
-    setIsCrawling(true);
-    setCrawledFiles([]);
-    setCrawlLog(["Establishing connection to Google Workspace...", `Accessing root directory: ${folderId}`]);
-
-    try {
-      const parsedAssets = await traverseAndDigest(folderId);
-
-      if (parsedAssets.length === 0) {
-        setCrawlLog(prev => [...prev, "⚠️ No readable content files found in this directory tree."]);
-      } else {
-        setCrawledFiles(parsedAssets);
-        setCrawlLog(prev => [...prev, `🎉 Knowledge matrix synchronized recursively. Total files: ${parsedAssets.length}`]);
-      }
-    } catch (error: any) {
-      setCrawlLog(prev => [...prev, `❌ Error syncing workspace: ${error.message}`]);
-    } finally {
-      setIsCrawling(false);
-    }
-  };
-
-  // Export Zip configuration instead of GitHub sync
-  const handleExportZip = async () => {
-    setIsDeploying(true);
-    setDeployLogs([
-      "● PREPARING ARCHIVE PAYLOAD...",
-      "● COMPILING GEM INSTRUCTIONS AND KNOWLEDGE..."
-    ]);
-
-    try {
-      const zip = new JSZip();
-      
-      // Generate a synthesized 'backend' / configuration file for the gem
-      const gemConfigFile = {
-        gemName,
-        gemRole,
-        gemTone,
-        presetId,
-        knowledgeBaseCount: crawledFiles.length,
-        injectedKnowledge: crawledFiles.map(f => ({ name: f.name, data: f.content }))
-      };
-
-      // Payload representing our statically generated frontend for the External User
-      const externalUserHtmlSnippet = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>${gemName} - AI Gem Configured Edge</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body { font-family: 'Inter', system-ui, sans-serif; background: #fafafa; color: #111; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
-    .card { background: #ffffff; border: 1px solid #eaeaea; padding: 3rem; border-radius: 16px; width: 100%; max-width: 600px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.05); }
-    h1 { margin-top: 0; color: #111; font-weight: 700; letter-spacing: -0.02em; }
-    .badge { display: inline-block; background: #e0f2fe; color: #0284c7; font-size: 0.75rem; font-weight: 600; padding: 4px 10px; border-radius: 99px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1rem; }
-    p { color: #555; line-height: 1.6; }
-    .instructions { background: #f8fafc; border: 1px solid #e2e8f0; padding: 1.5rem; text-align: left; border-radius: 8px; font-size: 0.9rem; margin-top: 2rem; color: #334155; }
-    .input-box { width: 100%; padding: 14px; margin-top: 20px; border-radius: 8px; border: 1px solid #ccc; font-size: 1rem; box-sizing: border-box; transition: border-color 0.2s; }
-    .input-box:focus { border-color: #0ea5e9; outline: none; box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.1); }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="badge">Cloudflare Pages Edge Bundle</div>
-    <h1>${gemName}</h1>
-    <p>This front-end environment has been statically configured via the AI Studio Admin Panel.</p>
-    <p>We've loaded <strong>${crawledFiles.length}</strong> knowledge base assets dynamically from your workspace into the edge context.</p>
+    schedule(3500, () => addTranscript("Our current cloud egress is hovering around 500TB a month.", "user"));
+    schedule(3800, () => {
+      addTelemetry("→ [Workers AI] Entity Extracted: 500TB egress/month.", "ai");
+      addTelemetry("→ [Pipeline] Pushing telemetry delta to GCP Data Lake...", "sys");
+    });
     
-    <div class="instructions">
-      <strong>Core Directives:</strong><br/>
-      ${gemRole}
-    </div>
+    schedule(5500, () => {
+      addTranscript("I've securely logged the 500TB estimate for your Q3 migration. I will compile the financial model and sync it directly to your Workspace.", "ai");
+      addTelemetry("→ [Audio Gen] Synthesized TTS response sent to client edge.", "ai");
+    });
 
-    <input type="text" class="input-box" placeholder="Engage with the gem..." />
-  </div>
-</body>
-</html>`;
+    schedule(7500, () => addTelemetry("→ [GCP SDK / Docs] Document automatically drafted: 'Enterprise_Migration_Quote.gdoc'.", "sys"));
+    schedule(8500, () => addTelemetry("→ [GCP SDK / Sheets] Financial backend updated with MRR projection.", "sys"));
+    
+    schedule(10000, () => {
+      addTelemetry("→ [WebRTC] Stream terminated by user. Finalizing Workspace commit.", "sys");
+      setIsMeetingActive(false);
+    });
+  };
 
-      zip.file("public/index.html", externalUserHtmlSnippet);
-      zip.file("src/config/gem-knowledge.json", JSON.stringify(gemConfigFile, null, 2));
-
-      setDeployLogs(prev => [...prev, "● GENERATING ZIP BLOB..."]);
-      
-      const content = await zip.generateAsync({ type: "blob" });
-      const url = window.URL.createObjectURL(content);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `gem-export-${gemName.replace(/\s+/g, '-').toLowerCase()}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-
-      setDeployLogs(prev => [
-        ...prev,
-        "✨ EXPORT COMPLETED SUCCESSFULLY.",
-        "🎉 The Gem frontend bundle is ready for Cloudflare Pages deployment."
-      ]);
-
-    } catch (err: any) {
-      setDeployLogs(prev => [...prev, `❌ Export Failed: ${err.message}`]);
-    } finally {
-      setIsDeploying(false);
-    }
+  const handleStopMeeting = () => {
+    activeTimeouts.current.forEach(clearTimeout);
+    addTelemetry("→ [WebRTC] Stream interrupted manually. Session committed to GCP.", "sys");
+    setIsMeetingActive(false);
   };
 
   return (
-    <div className="min-h-screen bg-[#050505] text-[#EDEDED] font-sans selection:bg-[#34D399]/30 relative overflow-x-hidden">
+    <div className="min-h-screen bg-[#050505] text-[#EDEDED] font-sans selection:bg-[#34D399]/30 relative overflow-hidden flex flex-col">
       {/* Background gradients */}
-      <div className="absolute top-[-100px] right-[-100px] w-96 h-96 bg-[#34D399] opacity-[0.03] blur-[120px] rounded-full pointer-events-none z-0"></div>
+      <div className="absolute top-1/4 left-1/4 w-[800px] h-[800px] bg-[#34D399] opacity-[0.02] blur-[150px] rounded-full pointer-events-none z-0"></div>
+      <div className="absolute bottom-0 right-0 w-[600px] h-[600px] bg-[#3b82f6] opacity-[0.02] blur-[120px] rounded-full pointer-events-none z-0"></div>
       
       {/* App Header */}
-      <header className="border-b border-white/5 bg-[#0A0A0A] relative z-10">
-        <div className="max-w-6xl mx-auto px-6 py-4 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 bg-[#34D399] rounded-lg shadow-[0_0_20px_rgba(52,211,153,0.15)] flex items-center justify-center">
-              <Shield className="w-5 h-5 text-black" />
+      <header className="border-b border-white/5 bg-[#0A0A0A] relative z-10 shrink-0">
+        <div className="w-full px-8 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="p-2.5 bg-gradient-to-br from-[#34D399] to-[#0ea5e9] rounded-xl flex items-center justify-center shadow-[0_0_30px_rgba(52,211,153,0.15)]">
+              <Waves className="w-5 h-5 text-black" strokeWidth={2.5} />
             </div>
             <div>
-              <h1 className="text-[15px] font-bold tracking-widest text-white uppercase flex items-center gap-2">
-                Domain Manager 
+              <h1 className="text-sm font-bold tracking-[0.2em] text-white uppercase flex items-center gap-2">
+                Vibe-OS <span className="text-white/20">|</span> Edge Engine
               </h1>
-              <p className="text-[9px] text-white/40 font-mono tracking-widest uppercase mt-0.5">
-                AI Gem Admin Control Plane
+              <p className="text-[10px] text-[#34D399] font-mono tracking-widest uppercase mt-0.5 opacity-80">
+                Cloudflare Workers × AI Studio × Workspace Data Lake
               </p>
             </div>
           </div>
           
           <div className="flex items-center gap-4">
             {user ? (
-              <div className="flex items-center gap-3 bg-white/5 border border-white/10 px-4 py-1.5 rounded-full shadow-inner">
-                {user.photoURL ? (
-                  <img src={user.photoURL} alt="Profile" className="w-6 h-6 rounded-full border border-white/20" />
-                ) : (
-                  <div className="w-6 h-6 bg-white/10 flex justify-center items-center rounded-full text-xs font-semibold text-white">
-                    {user.displayName?.[0] || 'A'}
-                  </div>
-                )}
+              <div className="flex items-center gap-3 bg-white/5 border border-white/10 px-4 py-2 rounded-xl backdrop-blur">
+                <div className="w-6 h-6 bg-gradient-to-tr from-[#3b82f6] to-[#d946ef] flex justify-center items-center rounded-full text-xs font-bold text-white shadow-inner">
+                  {user.displayName?.[0] || 'A'}
+                </div>
                 <div className="text-left hidden md:block">
-                  <p className="text-xs font-semibold">{user.displayName || "Workspace Owner"}</p>
+                  <p className="text-[11px] uppercase tracking-wider font-semibold text-white/90">{user.displayName || "Workspace Owner"}</p>
                 </div>
                 <button onClick={handleDisconnect} className="text-white/40 hover:text-white ml-2 transition-colors">
                   <LogOut className="w-4 h-4" />
@@ -341,160 +175,194 @@ export default function App() {
             ) : (
               <button 
                 onClick={handleGoogleSignIn}
-                className="bg-white text-black text-xs font-bold py-2.5 px-6 rounded-full hover:bg-gray-200 transition-all flex items-center gap-2 shadow-lg"
+                className="bg-white text-black text-[11px] font-bold uppercase tracking-widest py-3 px-6 rounded-xl hover:bg-gray-200 transition-all flex items-center gap-2 shadow-lg"
               >
-                Authenticate Workspace
+                Connect Workspace Data Lake
               </button>
             )}
           </div>
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-6 py-10 space-y-8 relative z-10">
+      <main className="flex-1 w-full px-8 py-8 relative z-10 flex gap-6 min-h-0">
         
         {!user && (
-          <div className="p-4 bg-orange-900/10 border border-orange-500/20 rounded-xl text-orange-200/90 text-sm flex items-start gap-4 max-w-3xl">
-            <Info className="w-5 h-5 shrink-0 mt-0.5 text-orange-400" />
-            <p className="text-xs leading-relaxed">
-              <strong className="text-orange-400 mr-2 uppercase tracking-wide">Domain Admin Access Required.</strong> This control plane is restricted. You must sign in with your Google Workspace owner account to configure the Gem instructions, attach Google Drive knowledge assets, and export the external user frontend to the Cloudflare edge.
-            </p>
+          <div className="absolute inset-x-8 top-8 z-50 p-4 bg-orange-900/40 border border-orange-500/30 rounded-xl text-orange-200 backdrop-blur-md flex items-start gap-4 shadow-2xl">
+            <Info className="w-6 h-6 shrink-0 text-orange-400" />
+            <div>
+              <p className="text-sm font-bold uppercase tracking-widest text-orange-400 mb-1">Identity & Routing Layer Locked</p>
+              <p className="text-xs leading-relaxed max-w-4xl text-orange-200/80">
+                To access the AI Studio Prompt Engine and Cloudflare Edge Pipeline, authenticate to map your Google Workspace. The edge operates completely statelessly; all long-term context and PII is persisted purely within your Workspace Data Lake via standard GCP SDK tunnels.
+              </p>
+            </div>
           </div>
         )}
 
-        <div className={`grid grid-cols-1 lg:grid-cols-3 gap-6 transition-all duration-500 ${!user ? 'opacity-40 grayscale pointer-events-none' : ''}`}>
+        {/* 3-Column Vibe Architecture */}
+        <div className={`w-full grid grid-cols-1 md:grid-cols-12 gap-6 h-full transition-all duration-700 ${!user ? 'opacity-20 blur-sm pointer-events-none' : ''}`}>
           
-          {/* Column 1: Gem Instructions */}
-          <div className="bg-white/5 border border-white/10 rounded-2xl p-6 shadow-xl space-y-5 backdrop-blur-sm">
-            <div className="flex items-center gap-3 pb-4 border-b border-white/10">
-              <Bot className="w-5 h-5 text-[#34D399]" />
-              <h3 className="font-bold text-xs text-white uppercase tracking-wider">Gem Settings</h3>
+          {/* Column 1: AI Studio Config / Prompt Engine */}
+          <div className="col-span-3 flex flex-col gap-4">
+            <div className="uppercase tracking-widest text-[10px] text-white/40 font-bold mb-1 ml-1 flex items-center gap-2">
+              <Bot className="w-3.5 h-3.5" /> AI Studio Prompt Engine
             </div>
             
-            <div className="space-y-4">
-               <div>
-                <label className="block text-[10px] font-semibold text-white/50 uppercase tracking-widest mb-1.5 flex items-center gap-2">Agent Role Preset</label>
-                <select 
-                  value={presetId}
-                  onChange={e => handlePresetSelect(e.target.value)}
-                  className="w-full bg-black/40 border border-white/10 rounded-xl px-3.5 py-2.5 text-xs focus:border-[#34D399] focus:ring-1 focus:ring-[#34D399]/30 outline-none text-white transition-all appearance-none"
-                >
-                  <option value="financial" className="bg-[#111]">Financial Data Agent</option>
-                  <option value="support" className="bg-[#111]">Customer Support Agent</option>
-                  <option value="custom" className="bg-[#111]">Custom Agent</option>
-                </select>
-              </div>
-              
-              <div>
-                <label className="block text-[10px] font-semibold text-white/50 uppercase tracking-widest mb-1.5 flex items-center gap-2">Gem Identity Title</label>
-                <input 
-                  type="text" 
-                  value={gemName}
-                  onChange={e => setGemName(e.target.value)}
-                  placeholder="E.g., Customer Support Gem"
-                  className="w-full bg-black/40 border border-white/10 rounded-xl px-3.5 py-2.5 text-xs focus:border-[#34D399] outline-none text-white transition-all" 
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-white/50 uppercase tracking-widest mb-1.5">System Instructions / Behavior</label>
-                <textarea 
-                  rows={8}
-                  value={gemRole}
-                  onChange={e => setGemRole(e.target.value)}
-                  placeholder="You are an expert customer success manager..."
-                  className="w-full bg-black/40 border border-white/10 rounded-xl px-3.5 py-2.5 text-xs focus:border-[#34D399] outline-none text-white resize-none transition-all" 
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-white/50 uppercase tracking-widest mb-1.5">Output Tone</label>
-                <select 
-                  value={gemTone}
-                  onChange={e => setGemTone(e.target.value)}
-                  className="w-full bg-black/40 border border-white/10 rounded-xl px-3.5 py-2.5 text-xs focus:border-[#34D399] outline-none text-white transition-all appearance-none"
-                >
-                  <option value="professional" className="bg-[#111]">Professional & Direct</option>
-                  <option value="conversational" className="bg-[#111]">Warm & Conversational</option>
-                  <option value="academic" className="bg-[#111]">Academic & Thorough</option>
-                </select>
+            <div className="bg-white/5 border border-white/10 rounded-2xl p-5 shadow-xl flex-1 backdrop-blur-sm flex flex-col">
+              <p className="text-[11px] text-white/50 leading-relaxed mb-6">
+                Configure stateless behavior loaded into <code>workerd</code> isolates on Cloudflare Platforms. Interactions are handled autonomously to save centralized compute.
+              </p>
+
+              <div className="space-y-5 flex-1">
+                <div>
+                  <label className="block text-[9px] font-bold text-white/50 uppercase tracking-widest mb-2 flex items-center gap-2">Behavior Template</label>
+                  <div className="relative">
+                    <select 
+                      value={presetId}
+                      onChange={e => handlePresetSelect(e.target.value)}
+                      className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-3 text-[11px] font-medium tracking-wide focus:border-[#34D399] outline-none text-white transition-all appearance-none"
+                    >
+                      <option value="internal">Enterprise FinOps Agent</option>
+                      <option value="customer">Public Support Matrix</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className={`flex items-center gap-4 p-4 rounded-xl border ${accessLevel === 'zero-trust' ? 'bg-orange-500/5 border-orange-500/20' : 'bg-blue-500/5 border-blue-500/20'}`}>
+                  <Fingerprint className={`w-5 h-5 ${accessLevel === 'zero-trust' ? 'text-orange-400' : 'text-blue-400'}`} />
+                  <div>
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-white/50">Edge Routing Auth</p>
+                    <p className={`text-[11px] font-bold mt-1 ${accessLevel === 'zero-trust' ? 'text-orange-400' : 'text-blue-400'}`}>
+                      {accessLevel === 'zero-trust' ? 'Strict Zero-Trust Enforced' : 'Public Omnichannel Edge'}
+                    </p>
+                  </div>
+                </div>
+                
+                <div className="flex-1 flex flex-col">
+                  <label className="block text-[9px] font-bold text-white/50 uppercase tracking-widest mb-2">Deployed Prompt Payload</label>
+                  <textarea 
+                    value={gemRole}
+                    onChange={e => setGemRole(e.target.value)}
+                    className="w-full flex-1 min-h-[200px] bg-black/60 border border-white/10 rounded-xl px-4 py-4 text-[11px] focus:border-[#34D399] outline-none text-[#34D399] resize-none transition-all font-mono leading-relaxed" 
+                  />
+                </div>
               </div>
             </div>
           </div>
 
-          {/* Column 2: Drive Knowledge Integration */}
-          <div className="bg-white/5 border border-white/10 rounded-2xl p-6 shadow-xl space-y-5 backdrop-blur-sm">
-            <div className="flex items-center gap-3 pb-4 border-b border-white/10">
-              <Database className="w-5 h-5 text-[#3b82f6]" />
-              <h3 className="font-bold text-xs text-white uppercase tracking-wider">Workspace Knowledge Context</h3>
+          {/* Column 2: Multimodal Ingest (The Vibe Interface) */}
+          <div className="col-span-5 flex flex-col gap-4">
+            <div className="uppercase tracking-widest text-[10px] text-white/40 font-bold mb-1 ml-1 flex items-center gap-2">
+              <Mic className="w-3.5 h-3.5" /> Omni-Modal Ingestion Edge
+            </div>
+
+            <div className="bg-[#0a0a0a] border border-[#3b82f6]/20 rounded-2xl shadow-[0_0_50px_rgba(59,130,246,0.05)] flex-1 flex flex-col overflow-hidden relative">
+              {/* Meeting Header */}
+              <div className="bg-black/80 border-b border-white/5 p-4 flex items-center justify-between">
+                 <div className="flex gap-4">
+                   <button 
+                     onClick={isMeetingActive ? handleStopMeeting : simulateAiMeeting}
+                     className={`px-6 py-2.5 rounded-full text-[10px] font-bold tracking-widest uppercase flex items-center gap-2 transition-all ${
+                       isMeetingActive 
+                        ? 'bg-red-500/20 text-red-400 border border-red-500/30' 
+                        : 'bg-[#3b82f6]/20 text-[#3b82f6] border border-[#3b82f6]/30 hover:bg-[#3b82f6]/30'
+                     }`}
+                   >
+                     <Phone className="w-3.5 h-3.5" />
+                     {isMeetingActive ? "End Session Stream" : "Start AI Meeting"}
+                   </button>
+                   <button className="px-4 py-2.5 rounded-full text-[10px] bg-white/5 hover:bg-white/10 text-white/70 font-bold tracking-widest uppercase flex items-center gap-2 transition-all border border-white/5">
+                     <Paperclip className="w-3.5 h-3.5" />
+                     Attach File
+                   </button>
+                 </div>
+                 
+                 {isMeetingActive && (
+                   <div className="flex items-center gap-2 text-[#34D399] bg-[#34D399]/10 px-3 py-1.5 rounded-full border border-[#34D399]/20">
+                     <Activity className="w-3.5 h-3.5 animate-pulse" />
+                     <span className="text-[9px] font-bold tracking-widest uppercase animate-pulse">WebRTC Live</span>
+                   </div>
+                 )}
+              </div>
+
+              {/* Streaming Area */}
+              <div className="flex-1 p-6 flex flex-col bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] bg-fixed" style={{ backgroundSize: '40px' }}>
+                
+                {meetingTranscript.length === 0 && !isMeetingActive ? (
+                  <div className="flex-1 flex flex-col items-center justify-center opacity-30">
+                    <Video className="w-12 h-12 mb-4" />
+                    <p className="text-xs uppercase tracking-widest text-center w-2/3 leading-relaxed">
+                      Stateless human interaction. Avoid manual input. <br/>Speak, visualize, or attach payloads for Edge processing.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex-1 overflow-y-auto space-y-4 pr-2">
+                    {meetingTranscript.map((msg, i) => (
+                      <div key={i} className={`flex flex-col gap-1 ${msg.type === 'ai' ? 'items-start' : 'items-end'}`}>
+                        <div className={`px-4 py-3 max-w-[80%] text-[12px] leading-relaxed rounded-2xl ${
+                          msg.type === 'ai' 
+                            ? 'bg-[#111] border border-white/10 text-white/90 rounded-tl-sm' 
+                            : 'bg-[#3b82f6]/20 border border-[#3b82f6]/30 text-[#60a5fa] rounded-tr-sm'
+                        }`}>
+                          {msg.text}
+                        </div>
+                        <span className="text-[9px] text-white/30 font-mono tracking-widest">{msg.time}</span>
+                      </div>
+                    ))}
+                    <div ref={transcriptEndRef} />
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Column 3: Pipeline & Workspace */}
+          <div className="col-span-4 flex flex-col gap-4">
+             <div className="uppercase tracking-widest text-[10px] text-white/40 font-bold mb-1 ml-1 flex items-center gap-2">
+              <Database className="w-3.5 h-3.5" /> Edge-to-Workspace Routing
             </div>
             
-            <p className="text-[11px] text-white/50 leading-relaxed font-medium">
-              Recursively crawl secure Google Drive folders and spreadsheets into the Gem's back-end vector space.
-            </p>
+            <div className="bg-black/90 border border-[#34D399]/20 rounded-2xl shadow-[0_0_40px_rgba(52,211,153,0.05)] flex-1 flex flex-col overflow-hidden relative">
+              <div className="bg-[#111] border-b border-[#34D399]/10 p-4 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <Terminal className="w-4 h-4 text-[#34D399]" />
+                  <h3 className="font-mono text-xs text-white tracking-widest uppercase">Cloudflare Telemetry</h3>
+                </div>
+              </div>
 
-            <div className="space-y-3 pt-2">
-              <input 
-                type="text" 
-                value={driveUrlOrId}
-                onChange={e => setDriveUrlOrId(e.target.value)}
-                placeholder="Paste Drive Folder Link or ID..."
-                className="w-full bg-black/40 border border-white/10 rounded-xl px-3.5 py-2.5 text-xs focus:border-[#3b82f6] outline-none transition-all text-white" 
-              />
-              <button 
-                onClick={handleCrawlDrive}
-                disabled={isCrawling || !driveUrlOrId}
-                className="w-full bg-[#3b82f6]/10 border border-[#3b82f6]/30 hover:bg-[#3b82f6]/20 text-[#3b82f6] text-xs font-bold py-2.5 px-4 rounded-xl transition-all flex justify-center items-center gap-2 disabled:opacity-50"
+              <div 
+                className="flex-1 p-5 font-mono text-[10px] leading-relaxed overflow-y-auto space-y-2.5"
               >
-                {isCrawling ? <RefreshCw className="w-4 h-4 animate-spin" /> : <FolderOpen className="w-4 h-4" />}
-                Sync Local Workspace Assets
-              </button>
-            </div>
+                {telemetryLogs.length === 0 ? (
+                  <div className="text-white/20 italic">Awaiting streams or file payloads...</div>
+                ) : (
+                  telemetryLogs.map((log, index) => (
+                    <div key={index} className="flex gap-3 break-words">
+                      <span className="text-[#404040] shrink-0">[{log.time}]</span>
+                      <span className={`${
+                        log.type === 'ai' ? 'text-[#34D399]' : 'text-white/60'
+                      }`}>
+                        {log.text}
+                      </span>
+                    </div>
+                  ))
+                )}
+                {isMeetingActive && (
+                  <div className="flex gap-3">
+                    <span className="text-white/30 animate-pulse shrink-0">[{new Date().toISOString().split('T')[1].slice(0,8)}]</span>
+                    <span className="text-white/30 animate-pulse tracking-widest">Listening at border server...</span>
+                  </div>
+                )}
+                <div ref={telemetryEndRef} />
+              </div>
 
-            {crawlLog.length > 0 && (
-              <div className="bg-black/60 rounded-xl p-3.5 border border-white/10 max-h-40 overflow-y-auto text-[10px] font-mono text-white/70 space-y-1.5 shadow-inner">
-                {crawlLog.map((log, i) => <div key={i} className={log.includes("❌") ? "text-red-400" : ""}>{log}</div>)}
+              <div className="border-t border-white/5 bg-[#111] p-4 text-[10px] text-white/40 leading-relaxed font-medium">
+                Identity: <strong>Workspace SDK</strong><br/>
+                Silo: <strong>GCP Data Lake</strong><br/>
+                Compute: <strong>Cloudflare Edge Workers AI Component</strong>
               </div>
-            )}
-            
-            {crawledFiles.length > 0 && (
-              <div className="text-[10px] font-bold text-[#3b82f6] uppercase tracking-widest bg-[#3b82f6]/10 px-3 py-2 rounded-lg border border-[#3b82f6]/20 flex items-center gap-2">
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                {crawledFiles.length} Total Base Assets Synced Successfully
-              </div>
-            )}
+            </div>
           </div>
 
-          {/* Column 3: Edge GitOps Deploy */}
-          <div className="bg-white/5 border border-white/10 rounded-2xl p-6 shadow-xl flex flex-col h-full backdrop-blur-sm">
-            <div className="flex items-center gap-3 pb-4 border-b border-white/10 mb-5">
-              <Network className="w-5 h-5 text-[#d946ef]" />
-              <h3 className="font-bold text-xs text-white uppercase tracking-wider">Edge Artifact Export</h3>
-            </div>
-            
-            <p className="text-[11px] text-white/50 leading-relaxed mb-4 font-medium">
-              Export the synthesized back-end configs, knowledge data, and HTML artifacts as a ZIP payload. You can manually deploy this to Cloudflare Pages for the public-facing external Gem experience.
-            </p>
-
-            <button 
-              onClick={handleExportZip}
-              disabled={isDeploying || crawledFiles.length === 0}
-              className="mt-6 w-full bg-[#d946ef] hover:bg-[#c026d3] text-white font-bold text-xs tracking-wider uppercase py-3.5 rounded-xl transition-all shadow-[0_0_15px_rgba(217,70,239,0.3)] hover:shadow-[0_0_25px_rgba(217,70,239,0.5)] flex justify-center items-center gap-2 disabled:opacity-50 disabled:shadow-none"
-            >
-              {isDeploying ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-              Download Cloudflare Bundle
-            </button>
-            
-            {deployLogs.length > 0 && (
-              <div className="mt-4 bg-black/60 rounded-xl p-3.5 border border-white/10 max-h-32 overflow-y-auto text-[10px] font-mono text-white/70 space-y-1.5 shadow-inner">
-                {deployLogs.map((log, i) => <div key={i} className={log.startsWith("❌") ? "text-red-400 font-bold" : "text-white/60"}>{log}</div>)}
-              </div>
-            )}
-            
-            {crawledFiles.length === 0 && (
-               <div className="mt-4 text-[10px] text-white/40 text-center uppercase tracking-widest border border-white/5 bg-black/20 p-2 rounded-lg">
-                  Sync Drive assets first
-               </div>
-            )}
-          </div>
-          
         </div>
       </main>
     </div>
