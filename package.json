@@ -18,11 +18,14 @@
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "firebase": "^12.13.0",
+    "firebase-admin": "^13.10.0",
+    "googleapis": "^172.0.0",
     "jszip": "^3.10.1",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "stripe": "^22.1.1",
     "vite": "^6.2.3"
   },
   "devDependencies": {
