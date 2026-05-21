@@ -4,9 +4,7 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import * as admin from "firebase-admin";
-import { Octokit } from "@octokit/rest";
 import { google } from "googleapis";
-import Stripe from "stripe";
 
 dotenv.config();
 
@@ -212,47 +210,7 @@ app.get("/api/meeting/stream", async (req, res) => {
   }
 });
 
-// 3. /api/github/push
-app.post("/api/github/push", authenticateUser, async (req, res) => {
-  try {
-    const { files, repoOwner, repoName, branch, token, commitMessage } = req.body;
-    if (!token) return res.status(400).json({ error: "Missing GitHub token" });
-
-    const octokit = new Octokit({ auth: token });
-
-    for (const file of files) {
-      let sha;
-      try {
-        const { data } = await octokit.repos.getContent({
-          owner: repoOwner,
-          repo: repoName,
-          path: file.name,
-          ref: branch
-        });
-        if (!Array.isArray(data) && (data as any).sha) sha = (data as any).sha;
-      } catch (e) {
-        // File does not exist yet mapping to a 404 which is fine
-      }
-
-      await octokit.repos.createOrUpdateFileContents({
-        owner: repoOwner,
-        repo: repoName,
-        path: file.name,
-        message: commitMessage || `Automatic Vibe-OS Sync: ${file.name}`,
-        content: Buffer.from(file.content).toString('base64'),
-        branch: branch || "main",
-        sha
-      });
-    }
-
-    res.json({ commitUrl: `https://github.com/${repoOwner}/${repoName}` });
-  } catch (error: any) {
-    console.error("GitHub Push Error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// 4. /api/workspace/commit
+// 3. /api/workspace/commit
 app.post("/api/workspace/commit", authenticateUser, async (req, res) => {
   try {
     const { transcript, accessToken } = req.body;
@@ -286,27 +244,51 @@ app.post("/api/workspace/commit", authenticateUser, async (req, res) => {
   }
 });
 
-// 5. /api/stripe/meter
-app.post("/api/stripe/meter", authenticateUser, async (req, res) => {
+// 4. /api/workspace/blueprint
+app.post("/api/workspace/blueprint", authenticateUser, async (req, res) => {
   try {
-    const { account_id, usage_units, event_type } = req.body;
-    const stripeKey = process.env.STRIPE_SECRET_KEY;
-    if (!stripeKey) return res.status(500).json({ error: "STRIPE_SECRET_KEY not configured" });
+    const { accessToken, intentPrompt } = req.body;
+    if (!accessToken) return res.status(400).json({ error: "Missing Google Workspace accessToken" });
 
-    const stripe = new Stripe(stripeKey, { apiVersion: "2024-06-20" as any });
+    const oauth2Client = new google.auth.OAuth2();
+    oauth2Client.setCredentials({ access_token: accessToken });
+    const sheets = google.sheets({ version: 'v4', auth: oauth2Client });
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-    const event = await stripe.billing.meterEvents.create({
-      event_name: event_type || 'edge_inference_session',
-      payload: {
-        stripe_customer_id: account_id || 'cus_unknown',
-        value: (usage_units || 1).toString(),
-      },
+    const title = `ISO/SOC2 Enterprise Blueprint`;
+
+    // Create a new spreadsheet
+    const createRes = await sheets.spreadsheets.create({ 
+      requestBody: { 
+        properties: { title },
+        sheets: [
+          { properties: { title: "Tech Stack" } },
+          { properties: { title: "Data Silos" } },
+          { properties: { title: "Integrations" } }
+        ]
+      } 
     });
+    
+    const spreadsheetId = createRes.data.spreadsheetId!;
 
-    res.json({ status: "success", event_id: event.id });
+    // Add intent prompt to the first sheet
+    if (intentPrompt) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: "Tech Stack!A1:B2",
+        valueInputOption: "RAW",
+        requestBody: {
+          values: [
+            ["Business Intent", intentPrompt],
+            ["Generated Date", new Date().toISOString()]
+          ]
+        }
+      });
+    }
+
+    res.json({ spreadsheetId, url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit` });
   } catch (error: any) {
-    console.error("Stripe Meter Error:", error);
-    // Continue gracefully even if Stripe fails, so as not to break the core loop for demo
+    console.error("Workspace Blueprint Error:", error);
     res.status(500).json({ error: error.message });
   }
 });

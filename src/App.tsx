@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User, signOut, getIdToken } from "firebase/auth";
-import { Shield, LogOut, Info, Bot, Terminal, Mic, Video, Phone, Activity, Paperclip, Waves, Database, Map, Download, Github, Zap } from "lucide-react";
+import { Shield, LogOut, Info, Bot, Terminal, Mic, Video, Phone, Activity, Paperclip, Waves, Database, Map, Download, FileSpreadsheet } from "lucide-react";
 import JSZip from "jszip";
 import firebaseConfig from "../firebase-applet-config.json";
 
@@ -10,6 +10,7 @@ const auth = getAuth(app);
 const provider = new GoogleAuthProvider();
 provider.addScope("https://www.googleapis.com/auth/drive.readonly");
 provider.addScope("https://www.googleapis.com/auth/drive.file"); // required to create docs
+provider.addScope("https://www.googleapis.com/auth/spreadsheets"); // required to create sheets
 
 type AccessLevel = "internal" | "staff" | "vendor" | "customer";
 type LogEntry = { time: string; text: string; type: "sys" | "ai" | "user" };
@@ -23,15 +24,8 @@ export default function App() {
   // Access Roles
   const [accessLevel, setAccessLevel] = useState<AccessLevel>("internal");
 
-  // Wizard State
-  const [wizardStep, setWizardStep] = useState(1);
-  const [wizardData, setWizardData] = useState({
-    purpose: "Customer Support Bot",
-    audience: "Public Customers",
-    dataSources: [] as string[],
-    edgeBehavior: "Voice-first / Text fallback",
-    githubSync: false
-  });
+  // AI Studio Intent State
+  const [intentPrompt, setIntentPrompt] = useState("Build a secure customer support agent plaza using omni-channel voice, routed to GCP Data Lakes with Zero-Trust manhole cover access for our internal ops team.");
 
   // Edge Interaction State
   const [isMeetingActive, setIsMeetingActive] = useState(false);
@@ -46,9 +40,9 @@ export default function App() {
   const [generatedFiles, setGeneratedFiles] = useState<{name: string, content: string, language: string}[]>([]);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   
-  // GitHub state
-  const [githubToken, setGithubToken] = useState("");
-  const [githubRepo, setGithubRepo] = useState("");
+  // Blueprint
+  const [blueprintUrl, setBlueprintUrl] = useState<string | null>(null);
+  const [blueprintInitializing, setBlueprintInitializing] = useState(false);
 
   const addTelemetry = (text: string, type: "sys" | "ai" = "sys") => {
     setTelemetryLogs(prev => [...prev, { time: new Date().toISOString().split('T')[1].slice(0,8), text, type }]);
@@ -92,6 +86,12 @@ export default function App() {
     setAccessToken("");
   };
 
+  const synthesizeInfrastructure = async () => {
+    if (!idToken || !accessToken) return alert("Please authenticate Workspace first.");
+    await initializeBlueprint(intentPrompt);
+    await generateAndDeploy(intentPrompt);
+  };
+
   const toggleDataSource = (src: string) => {
     setWizardData(prev => ({
       ...prev,
@@ -106,13 +106,6 @@ export default function App() {
     setIsMeetingActive(true);
     setMeetingTranscript([]);
     
-    // Stripe metering call
-    fetch('/api/stripe/meter', {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${idToken}` },
-      body: JSON.stringify({ account_id: user?.uid, usage_units: 1, event_type: 'edge_inference_session' })
-    }).catch(console.error);
-
     // Setup SSE
     const es = new EventSource(`/api/meeting/stream?token=${idToken}`);
     eventSourceRef.current = es;
@@ -173,16 +166,36 @@ export default function App() {
     }
   };
 
-  const generateAndDeploy = async () => {
+  const initializeBlueprint = async (prompt?: string) => {
+    if (!idToken || !accessToken) return;
+    setBlueprintInitializing(true);
+    addTelemetry("Initializing ISO/SOC2 Enterprise Blueprint...", "sys");
+    try {
+      const res = await fetch("/api/workspace/blueprint", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${idToken}` },
+        body: JSON.stringify({ accessToken, intentPrompt: prompt })
+      });
+      const data = await res.json();
+      if (data.url) {
+        setBlueprintUrl(data.url);
+        addTelemetry(`Blueprint initialized at ${data.url}`, "sys");
+      }
+    } catch(e) {
+      console.error(e);
+      addTelemetry("Blueprint Initialization Failed", "sys");
+    } finally {
+      setBlueprintInitializing(false);
+    }
+  };
+
+  const generateAndDeploy = async (prompt?: string) => {
     setIsGenerating(true);
     setGeneratedFiles([]);
     addTelemetry("Initiating Engine Generation Sequence...", "sys");
 
     const promptPayload = `
-      PURPOSE: ${wizardData.purpose}
-      TARGET AUDIENCE: ${wizardData.audience}
-      DATA ORIGINS: ${wizardData.dataSources.join(', ')}
-      BEHAVIOR ALIGNMENT: ${wizardData.edgeBehavior}
+      INTENT: ${prompt || intentPrompt}
     `;
 
     try {
@@ -213,26 +226,6 @@ export default function App() {
     a.href = url;
     a.download = "vibe-os-edge.zip";
     a.click();
-  };
-
-  const pushToGithub = async () => {
-    if (!githubToken || !githubRepo) return alert("Please provide repo owner/name and token.");
-    
-    addTelemetry("Pushing to GitHub...", "sys");
-    const [owner, repo] = githubRepo.split("/");
-    try {
-      const res = await fetch("/api/github/push", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${idToken}` },
-        body: JSON.stringify({ files: generatedFiles, repoOwner: owner, repoName: repo, token: githubToken })
-      });
-      const data = await res.json();
-      if (data.commitUrl) {
-         addTelemetry(`GitHub Push Complete: ${data.commitUrl}`, "sys");
-      }
-    } catch(e) {
-      addTelemetry("GitHub Push Failed", "sys");
-    }
   };
 
   const showColumn1 = accessLevel === "internal" || accessLevel === "staff";
@@ -273,9 +266,16 @@ export default function App() {
             {user ? (
               <div className="flex items-center gap-4">
                  {accessLevel === "internal" && (
-                    <div className="flex items-center gap-2 bg-pink-500/10 px-3 py-1.5 rounded-full border border-pink-500/20 text-pink-300 text-[10px] font-bold uppercase tracking-widest shadow-inner cursor-default">
-                       <Zap className="w-3.5 h-3.5" /> Metered Edge Wallet
-                    </div>
+                    blueprintUrl ? (
+                      <a href={blueprintUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 bg-emerald-500/10 hover:bg-emerald-500/20 px-3 py-1.5 rounded-full border border-emerald-500/30 text-emerald-300 text-[10px] font-bold uppercase tracking-widest shadow-inner transition-all">
+                         <FileSpreadsheet className="w-3.5 h-3.5" /> View Blueprint
+                      </a>
+                    ) : (
+                      <button onClick={() => initializeBlueprint(intentPrompt)} disabled={blueprintInitializing} className="flex items-center gap-2 bg-blue-500/10 hover:bg-blue-500/20 px-3 py-1.5 rounded-full border border-blue-500/30 text-blue-300 text-[10px] font-bold uppercase tracking-widest shadow-inner transition-all disabled:opacity-50">
+                         {blueprintInitializing ? <Activity className="w-3.5 h-3.5 animate-spin"/> : <FileSpreadsheet className="w-3.5 h-3.5" />} 
+                         Initialize Blueprint
+                      </button>
+                    )
                  )}
                  <div className="flex items-center gap-3 bg-white/5 border border-white/10 px-4 py-2 rounded-xl">
                    <div className="w-6 h-6 bg-gradient-to-tr from-[#3b82f6] to-[#10b981] flex justify-center items-center rounded-full text-xs font-bold text-white shadow-inner">
@@ -315,70 +315,34 @@ export default function App() {
 
         <div className={`w-full grid ${showColumn1 && showColumn3 ? "grid-cols-1 md:grid-cols-12" : (showColumn3 ? "grid-cols-1 md:grid-cols-10" : "grid-cols-1")} gap-6 h-full transition-all`}>
           
-          {/* Column 1: Config Wizard */}
+          {/* Column 1: AI Studio Prompt */}
           {showColumn1 && (
              <div className="col-span-3 flex flex-col gap-4 overflow-y-auto pr-2">
                 <div className="uppercase tracking-widest text-[10px] text-white/40 font-bold mb-1 ml-1 flex items-center gap-2">
-                  <Terminal className="w-3.5 h-3.5" /> Prompt Generator
+                  <Terminal className="w-3.5 h-3.5" /> AI Studio Prompt Engine
                 </div>
                 
-                <div className="bg-[#0f172a] border border-blue-500/20 rounded-2xl p-5 shadow-xl flex flex-col gap-6 relative">
+                <div className="bg-[#0f172a] border border-blue-500/20 rounded-2xl p-5 shadow-xl flex flex-col gap-4 relative flex-1">
                    
-                   <div>
-                      <p className="text-[10px] uppercase font-bold text-blue-400 mb-2">Step 1: Architect Model</p>
-                      <select 
-                         value={wizardData.purpose} onChange={e => setWizardData({...wizardData, purpose: e.target.value})}
-                         className="w-full bg-black/40 border border-blue-500/30 rounded-xl px-4 py-2.5 text-xs text-white outline-none"
-                      >
-                         <option>Customer Support Bot</option>
-                         <option>Financial Dashboard</option>
-                         <option>Content CMS</option>
-                         <option>Custom Tooling</option>
-                      </select>
-                   </div>
-                   
-                   <div>
-                      <p className="text-[10px] uppercase font-bold text-blue-400 mb-2">Step 2: Perimeter Audience</p>
-                      <div className="flex flex-col gap-2">
-                         {["Public Customers", "Internal Staff", "Vendor Tunnel"].map(mode => (
-                           <label key={mode} className="flex items-center gap-3 text-xs">
-                             <input type="radio" name="audience" checked={wizardData.audience === mode} onChange={() => setWizardData({...wizardData, audience: mode})} className="accent-blue-500" />
-                             {mode}
-                           </label>
-                         ))}
-                      </div>
-                   </div>
+                   <p className="text-xs text-blue-200/70 mb-2 leading-relaxed">
+                     Describe your business infrastructure needs. AI Studio automatically engineers the Cloudflare Edge, establishes Zero-Trust manhole covers, and generates the ISO/SOC2 blueprint in Google Workspace.
+                   </p>
 
-                   <div>
-                      <p className="text-[10px] uppercase font-bold text-blue-400 mb-2">Step 3: Connect Data Streams</p>
-                      <div className="flex flex-col gap-2">
-                         {["Google Drive Core", "Google Sheets Ledger", "GCP BigQuery"].map(src => (
-                           <label key={src} className="flex items-center gap-3 text-xs">
-                             <input type="checkbox" checked={wizardData.dataSources.includes(src)} onChange={() => toggleDataSource(src)} className="accent-blue-500" />
-                             {src}
-                           </label>
-                         ))}
-                      </div>
+                   <div className="flex-1 flex flex-col">
+                      <p className="text-[10px] uppercase font-bold text-blue-400 mb-2">Architectural Intent</p>
+                      <textarea 
+                         value={intentPrompt} onChange={e => setIntentPrompt(e.target.value)}
+                         className="w-full flex-1 min-h-[200px] bg-black/40 border border-blue-500/30 rounded-xl p-4 text-xs text-white outline-none resize-none font-mono focus:border-blue-400 transition-colors"
+                      />
                    </div>
                    
-                   <div>
-                      <p className="text-[10px] uppercase font-bold text-blue-400 mb-2">Step 4: Edge Behavior</p>
-                      <select 
-                         value={wizardData.edgeBehavior} onChange={e => setWizardData({...wizardData, edgeBehavior: e.target.value})}
-                         className="w-full bg-black/40 border border-blue-500/30 rounded-xl px-4 py-2.5 text-xs text-white outline-none"
-                      >
-                         <option>Voice-first / Stream to Cloudflare Worker</option>
-                         <option>Text-first / REST API Bridge</option>
-                      </select>
-                   </div>
-
                    <button 
-                     onClick={generateAndDeploy}
-                     disabled={isGenerating}
-                     className="mt-4 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-[11px] font-bold uppercase tracking-widest py-3 rounded-xl transition-all shadow-lg flex items-center justify-center gap-2"
+                     onClick={synthesizeInfrastructure}
+                     disabled={isGenerating || blueprintInitializing}
+                     className="mt-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-[11px] font-bold uppercase tracking-widest py-3.5 rounded-xl transition-all shadow-lg flex items-center justify-center gap-2"
                    >
-                     {isGenerating ? <Activity className="w-4 h-4 animate-spin" /> : <Bot className="w-4 h-4" />}
-                     {isGenerating ? "Synthesizing..." : "Generate Edge Pipeline"}
+                     {(isGenerating || blueprintInitializing) ? <Activity className="w-4 h-4 animate-spin" /> : <Bot className="w-4 h-4" />}
+                     {(isGenerating || blueprintInitializing) ? "Synthesizing Infrastructure..." : "Build Edge & Blueprint"}
                    </button>
                 </div>
              </div>
@@ -479,15 +443,6 @@ export default function App() {
                             <button onClick={downloadZip} className="flex items-center gap-2 bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-all">
                                <Download className="w-3.5 h-3.5" /> Download ZIP
                             </button>
-                            {accessLevel !== "vendor" && (
-                              <div className="flex gap-2">
-                                <input value={githubRepo} onChange={e => setGithubRepo(e.target.value)} placeholder="owner/repo" className="bg-black/60 border border-white/10 text-xs px-3 rounded-lg outline-none w-32 text-white" />
-                                <input value={githubToken} onChange={e => setGithubToken(e.target.value)} placeholder="gh token" type="password" className="bg-black/60 border border-white/10 text-xs px-3 rounded-lg outline-none w-24 text-white" />
-                                <button onClick={pushToGithub} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-all">
-                                   <Github className="w-3.5 h-3.5" /> Push
-                                </button>
-                              </div>
-                            )}
                          </div>
                       </div>
                    )}
